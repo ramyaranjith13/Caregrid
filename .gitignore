@@ -3,4 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 data/caregrid.db
+data/raw/
+data/processed/
+!data/README.md
 .env

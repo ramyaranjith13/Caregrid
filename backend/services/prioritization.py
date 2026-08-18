@@ -1,4 +1,4 @@
-from typing import Dict, Any
+from typing import Dict, Any, List
 from functools import cmp_to_key
 
 SCORE_MAX = {
@@ -15,6 +15,17 @@ SCORE_LABELS = {
     "deterioration": "Deterioration risk",
     "waiting": "Waiting time",
     "resource": "Resource compatibility",
+}
+
+# Required clinical fields for a reliable prototype recommendation.
+# Used only for data-quality warnings, never to fabricate values.
+REQUIRED_CLINICAL = {
+    "severity": "Clinical urgency (severity)",
+    "dependency": "Critical-care dependency",
+    "deterioration": "Deterioration risk",
+    "survival_likelihood": "Survival likelihood",
+    "resource": "Resource compatibility",
+    "required_resources": "Required resources",
 }
 
 
@@ -54,6 +65,30 @@ def explain_score(scores: Dict[str, float]) -> str:
     )
 
 
+def missing_clinical_fields(patient: Dict[str, Any]) -> List[str]:
+    """Return human-readable labels of required clinical fields that are missing.
+
+    A numeric field is considered missing when it is None or <= 0.
+    'required_resources' is missing when blank. This drives data-quality
+    warnings so CareGrid never presents a confident recommendation on
+    incomplete data.
+    """
+    missing: List[str] = []
+    for key, label in REQUIRED_CLINICAL.items():
+        value = patient.get(key)
+        if key == "required_resources":
+            if not str(value or "").strip():
+                missing.append(label)
+        else:
+            try:
+                numeric = float(value) if value is not None else 0.0
+            except (TypeError, ValueError):
+                numeric = 0.0
+            if numeric <= 0:
+                missing.append(label)
+    return missing
+
+
 def _compare(a: Dict[str, Any], b: Dict[str, Any]) -> int:
     score_diff = a["priority_score"] - b["priority_score"]
     if abs(score_diff) > 2:
@@ -81,6 +116,8 @@ def rank_patients(patients):
         row["scores"] = scores
         row["priority_score"] = calculate_priority(scores)
         row["score_explanation"] = explain_score(scores)
+        row["missing_data"] = missing_clinical_fields(row)
+        row["data_complete"] = len(row["missing_data"]) == 0
         enriched.append(row)
 
     enriched.sort(key=cmp_to_key(_compare))

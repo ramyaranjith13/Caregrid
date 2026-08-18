@@ -59,6 +59,52 @@ def init_db() -> None:
             decision_maker TEXT,
             reason TEXT
         );
+
+        -- Step-down bed inventory (logical separation from ICU beds).
+        CREATE TABLE IF NOT EXISTS step_down_beds (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            patient_id TEXT,
+            patient_name TEXT,
+            diagnosis TEXT,
+            equipment TEXT,
+            isolation TEXT,
+            compatibility TEXT
+        );
+
+        -- Imported Kaggle/synthetic dataset registry (metadata only; the raw
+        -- rows live in per-dataset tables created at import time).
+        CREATE TABLE IF NOT EXISTS dataset_imports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dataset_key TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            source TEXT,
+            file_hash TEXT UNIQUE,
+            dataset_version TEXT,
+            imported_at TEXT,
+            total_rows INTEGER,
+            imported_rows INTEGER,
+            rejected_rows INTEGER,
+            columns TEXT,
+            notes TEXT
+        );
+
+        -- Survival model training/validation registry.
+        CREATE TABLE IF NOT EXISTS model_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model_name TEXT,
+            model_version TEXT,
+            trained_at TEXT,
+            dataset_source TEXT,
+            dataset_version TEXT,
+            n_records INTEGER,
+            n_train INTEGER,
+            n_test INTEGER,
+            target_column TEXT,
+            target_meaning TEXT,
+            features TEXT,
+            metrics TEXT
+        );
         """
     )
 
@@ -73,6 +119,18 @@ def init_db() -> None:
     ]:
         _add_column_if_missing(cur, "patients", column, definition)
 
+    # Phase 1 (V2) additions: patient age.
+    _add_column_if_missing(cur, "patients", "age", "INTEGER NOT NULL DEFAULT 0")
+
+    # Phase 1 (V2) additions: rich audit trail columns.
+    for column, definition in [
+        ("patient_name", "TEXT"),
+        ("event", "TEXT"),
+        ("previous_value", "TEXT"),
+        ("new_value", "TEXT"),
+    ]:
+        _add_column_if_missing(cur, "audit_logs", column, definition)
+
     existing_users = cur.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
     if existing_users == 0:
         cur.executemany(
@@ -86,24 +144,27 @@ def init_db() -> None:
         )
 
     # Fictional hackathon patients and prototype scoring factors.
+    # Tuple order: id,name,age,diagnosis,waiting_minutes,critical,status,
+    #              severity,dependency,deterioration,survival_likelihood,resource,required_resources
     demo_patients = [
-        ("P003", "R. Kalyan", "Septic shock", 55, 1, "waiting", 31, 24, 18, 90, 7, "Ventilator, Cardiac Monitor, Vasopressor support"),
-        ("P001", "A. Fernandes", "Cardiac arrest, post-ROSC", 35, 1, "waiting", 32, 24, 17, 91, 5, "Ventilator, Cardiac Monitor"),
-        ("P005", "S. Iyer", "Acute ischemic stroke", 125, 1, "waiting", 27, 21, 16, 86, 4, "Neuro monitoring, Oxygen"),
-        ("P002", "M. Devaraj", "Acute respiratory failure", 250, 0, "waiting", 24, 18, 12, 84, 8, "Ventilator, Oxygen"),
-        ("P004", "K. Ramesh", "Post-operative monitoring", 380, 0, "waiting", 16, 12, 9, 82, 9, "Cardiac Monitor, Infusion Pump"),
+        ("P003", "R. Kalyan", 61, "Septic shock", 55, 1, "waiting", 31, 24, 18, 90, 7, "Ventilator, Cardiac Monitor, Vasopressor support"),
+        ("P001", "A. Fernandes", 58, "Cardiac arrest, post-ROSC", 35, 1, "waiting", 32, 24, 17, 91, 5, "Ventilator, Cardiac Monitor"),
+        ("P005", "S. Iyer", 72, "Acute ischemic stroke", 125, 1, "waiting", 27, 21, 16, 86, 4, "Neuro monitoring, Oxygen"),
+        ("P002", "M. Devaraj", 49, "Acute respiratory failure", 250, 0, "waiting", 24, 18, 12, 84, 8, "Ventilator, Oxygen"),
+        ("P004", "K. Ramesh", 66, "Post-operative monitoring", 380, 0, "waiting", 16, 12, 9, 82, 9, "Cardiac Monitor, Infusion Pump"),
     ]
 
     for row in demo_patients:
         cur.execute(
             """
             INSERT INTO patients(
-                id,name,diagnosis,waiting_minutes,critical,status,
+                id,name,age,diagnosis,waiting_minutes,critical,status,
                 severity,dependency,deterioration,survival_likelihood,resource,required_resources
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,
+                age=excluded.age,
                 diagnosis=excluded.diagnosis,
                 waiting_minutes=excluded.waiting_minutes,
                 critical=excluded.critical,
@@ -137,6 +198,24 @@ def init_db() -> None:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             beds,
+        )
+
+    existing_sd = cur.execute("SELECT COUNT(*) AS n FROM step_down_beds").fetchone()["n"]
+    if existing_sd == 0:
+        step_down = [
+            ("SD-01", "available", None, None, None, "Cardiac Monitor,Oxygen", "Not required", "High"),
+            ("SD-02", "occupied", "P020", "L. Menon", "Recovering pneumonia", "Oxygen", "Not required", "Medium"),
+            ("SD-03", "available", None, None, None, "Telemetry,Oxygen", "Not required", "High"),
+            ("SD-04", "occupied", "P021", "G. Rao", "Post-ICU step-down", "Telemetry", "Not required", "Medium"),
+            ("SD-05", "cleaning", None, None, None, "Cardiac Monitor", "Pending turnover", "—"),
+        ]
+        cur.executemany(
+            """
+            INSERT INTO step_down_beds(
+                id,status,patient_id,patient_name,diagnosis,equipment,isolation,compatibility
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            step_down,
         )
 
     conn.commit()
