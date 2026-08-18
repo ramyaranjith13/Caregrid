@@ -275,14 +275,51 @@ def reset_password(user_id, new_password):
 
 
 # ---- idempotent seeding ----
+def _seed_account(conn, email, name, password, role, department):
+    """Idempotently create/update one seed account using an env-provided password."""
+    if not email or not password:
+        return
+
+    email_norm = email.strip().lower()
+    existing = conn.execute(
+        "SELECT user_id, password_hash FROM users_auth WHERE email = ?",
+        (email_norm,),
+    ).fetchone()
+
+    if existing is None:
+        conn.execute(
+            """
+            INSERT INTO users_auth(user_id, full_name, email, password_hash, role,
+                              department, active, created_at, last_login)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL)
+            """,
+            (
+                f"USR-{uuid.uuid4().hex[:10]}",
+                name,
+                email_norm,
+                hash_password(password),
+                role,
+                department,
+                _iso(_now()),
+            ),
+        )
+    elif not verify_password(password, existing["password_hash"]):
+        conn.execute(
+            "UPDATE users_auth SET password_hash = ?, active = 1 WHERE email = ?",
+            (hash_password(password), email_norm),
+        )
+
+
 def seed_users():
-    """Create admin + demo accounts from env. Idempotent and safe to re-run."""
+    """Create administrator/demo accounts plus five named doctors from Render env vars.
+
+    Idempotent: re-running never creates duplicate email rows. Passwords are only
+    read from environment variables and are stored only as bcrypt hashes.
+    """
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@caregrid.local").strip().lower()
     admin_pw = os.environ.get("ADMIN_PASSWORD")
     demo_pw = os.environ.get("SEED_DEMO_PASSWORD")
-    if not admin_pw or not demo_pw:
-        # No credentials configured — skip seeding rather than hard-code anything.
-        return
+    shared_doctor_pw = os.environ.get("SEED_DOCTOR_PASSWORD")
 
     accounts = [
         (admin_email, "CareGrid Administrator", admin_pw, "Administrator", "Administration"),
@@ -291,25 +328,24 @@ def seed_users():
         ("nurse@caregrid.local", "Nurse on Duty", demo_pw, "Nurse", "ICU"),
         ("coordinator@caregrid.local", "ICU Coordinator", demo_pw, "Coordinator", "Operations"),
     ]
+
+    five_doctors = [
+        ("arun.kumar@caregrid.local", "Arun Kumar", "ICU"),
+        ("priya.sharma@caregrid.local", "Priya Sharma", "ICU"),
+        ("karthik.raj@caregrid.local", "Karthik Raj", "Critical Care"),
+        ("meera.nair@caregrid.local", "Meera Nair", "ICU"),
+        ("rahul.verma@caregrid.local", "Rahul Verma", "Critical Care"),
+    ]
+
     conn = get_connection()
     for email, name, pw, role, dept in accounts:
-        existing = conn.execute(
-            "SELECT user_id, password_hash FROM users_auth WHERE email = ?", (email,)
-        ).fetchone()
-        if existing is None:
-            conn.execute(
-                """
-                INSERT INTO users_auth(user_id, full_name, email, password_hash, role,
-                                  department, active, created_at, last_login)
-                VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL)
-                """,
-                (f"USR-{uuid.uuid4().hex[:10]}", name, email, hash_password(pw),
-                 role, dept, _iso(_now())),
-            )
-        elif not verify_password(pw, existing["password_hash"]):
-            conn.execute(
-                "UPDATE users_auth SET password_hash = ? WHERE email = ?",
-                (hash_password(pw), email),
-            )
+        _seed_account(conn, email, name, pw, role, dept)
+
+    for index, (email, name, dept) in enumerate(five_doctors, start=1):
+        # Prefer a unique per-doctor secret. A shared fallback can be used for a
+        # hackathon demo if five separate Render secrets are inconvenient.
+        pw = os.environ.get(f"DOCTOR_{index}_PASSWORD") or shared_doctor_pw
+        _seed_account(conn, email, name, pw, "Doctor", dept)
+
     conn.commit()
     conn.close()
