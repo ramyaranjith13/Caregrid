@@ -434,6 +434,7 @@ def dashboard():
     try:
         patients = api_get("/patients")
         beds = api_get("/icu/beds")
+        step_down = api_get("/step-down/beds")
     except requests.RequestException:
         st.error("CareGrid API is not running. Start FastAPI in another terminal.")
         return
@@ -443,13 +444,25 @@ def dashboard():
     available = sum(b["status"] == "available" for b in beds)
     occupied = sum(b["status"] == "occupied" for b in beds)
     cleaning = sum(b["status"] == "cleaning" for b in beds)
+    sd_available = sum(b["status"] == "available" for b in step_down)
+    alerts_count = (
+        critical
+        + sum(1 for p in patients if p["waiting_minutes"] >= 240)
+        + sum(1 for p in patients if not p.get("data_complete", True))
+    )
 
-    cols = st.columns(5)
-    cols[0].metric("AVAILABLE", available)
-    cols[1].metric("OCCUPIED", occupied)
-    cols[2].metric("PREPARING", cleaning)
-    cols[3].metric("WAITING", waiting)
-    cols[4].metric("CRITICAL", critical)
+    st.markdown("**ICU Capacity**")
+    cols = st.columns(6)
+    cols[0].metric("ICU AVAILABLE", available)
+    cols[1].metric("ICU OCCUPIED", occupied)
+    cols[2].metric("ICU PREPARING", cleaning)
+    cols[3].metric("STEP-DOWN AVAIL.", sd_available)
+    cols[4].metric("WAITING", waiting)
+    cols[5].metric("CRITICAL", critical)
+    if alerts_count:
+        st.warning(f"⚠️ {alerts_count} active alert(s) — see Alerts panel below.")
+    else:
+        st.success("No active alerts.")
 
     st.divider()
 
@@ -562,6 +575,17 @@ def dashboard():
             )
             st.write(
                 f"**System Recommendation:** {selected['recommendation']}"
+            )
+            care = selected.get("care_level", "—")
+            care_badge = {
+                "ICU Candidate": "🟥 ICU Candidate",
+                "Step-Down Candidate": "🟧 Step-Down Candidate",
+                "Ward / Continue Care": "🟩 Ward / Continue Care",
+            }.get(care, care)
+            st.markdown(f"**Care Level:** {care_badge}")
+            st.caption(
+                selected.get("care_level_note", "")
+                or "Prototype disposition threshold — not a clinical guideline."
             )
             st.caption(
                 "Prototype scoring framework. Final clinical decision remains with the authorized clinician."
@@ -706,6 +730,19 @@ def dashboard():
             width="stretch",
             hide_index=True,
         )
+
+    st.subheader("Step-Down Bed Status")
+    sd_df = pd.DataFrame(step_down)
+    if not sd_df.empty:
+        st.dataframe(
+            sd_df[
+                ["id", "status", "patient_id", "patient_name", "diagnosis", "equipment", "compatibility"]
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        st.info("No step-down beds configured.")
 
     st.divider()
     audit_trail_section()
@@ -901,16 +938,210 @@ def analytics_page():
     )
 
 
+def _csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def capacity_page():
+    st.markdown('<div class="cg-title">CAREGRID</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cg-sub">Capacity Analytics</div>', unsafe_allow_html=True)
+    try:
+        cap = api_get("/analytics/capacity")
+    except requests.RequestException:
+        st.error("CareGrid API is not running.")
+        return
+
+    st.subheader("Live Bed Capacity")
+    c = st.columns(6)
+    c[0].metric("ICU Available", cap["icu"]["available"])
+    c[1].metric("ICU Occupied", cap["icu"]["occupied"])
+    c[2].metric("ICU Preparing", cap["icu"]["preparing"])
+    c[3].metric("Step-Down Available", cap["step_down"]["available"])
+    c[4].metric("Step-Down Occupied", cap["step_down"]["occupied"])
+    c[5].metric("Step-Down Preparing", cap["step_down"]["preparing"])
+
+    st.divider()
+    st.subheader("Weekly Demand & Refusal by Service")
+    st.caption("Aggregated from the real operational dataset (services_weekly). Not simulated.")
+    if not cap["loaded"]:
+        st.info("Operational capacity dataset not loaded. Import it in Analytics / Validation.")
+        return
+    df = pd.DataFrame(cap["services"])
+    st.dataframe(df, width="stretch", hide_index=True)
+    fig = px.bar(
+        df, x="service", y=["total_admitted", "total_refused"],
+        barmode="group", title="Admitted vs Refused by Service (52 weeks)",
+    )
+    fig.update_layout(height=340, margin=dict(l=10, r=10, t=45, b=10))
+    st.plotly_chart(fig, width="stretch")
+    st.session_state["_capacity_df"] = df
+
+
+def export_page():
+    st.markdown('<div class="cg-title">CAREGRID</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cg-sub">CSV Export</div>', unsafe_allow_html=True)
+    st.caption("Download current CareGrid data as CSV. Read-only — available to all roles.")
+
+    try:
+        patients = api_get("/patients")
+        beds = api_get("/icu/beds")
+        step_down = api_get("/step-down/beds")
+        audit = api_get("/audit-log")
+        cap = api_get("/analytics/capacity")
+    except requests.RequestException:
+        st.error("CareGrid API is not running.")
+        return
+
+    # Priority queue (full)
+    if patients:
+        q = pd.DataFrame(patients)
+        queue_df = q[["rank", "id", "name", "diagnosis", "priority_score",
+                      "waiting_minutes", "survival_likelihood", "care_level"]]
+        ranking_summary = q[["rank", "id", "name", "priority_score", "care_level", "recommendation"]]
+    else:
+        queue_df = pd.DataFrame()
+        ranking_summary = pd.DataFrame()
+
+    exports = [
+        ("Current Priority Queue", "priority_queue.csv", queue_df),
+        ("Patient Ranking Summary", "ranking_summary.csv", ranking_summary),
+        ("Audit Trail", "audit_trail.csv", pd.DataFrame(audit)),
+        ("ICU Bed Status", "icu_bed_status.csv", pd.DataFrame(beds)),
+        ("Step-Down Bed Status", "step_down_bed_status.csv", pd.DataFrame(step_down)),
+        ("Capacity Analytics Summary", "capacity_summary.csv", pd.DataFrame(cap.get("services", []))),
+    ]
+
+    for label, fname, df in exports:
+        cols = st.columns([2, 1])
+        cols[0].markdown(f"**{label}** · {len(df)} rows")
+        if df.empty:
+            cols[1].caption("No data")
+        else:
+            cols[1].download_button(
+                "Download CSV", data=_csv_bytes(df), file_name=fname,
+                mime="text/csv", key=f"dl_{fname}",
+            )
+
+
+# ---- Simulation Mode (synthetic demo patients only; never touches live DB) ----
+SIM_PATIENTS = [
+    {"id": "SIM-1", "name": "Sim A", "diagnosis": "Septic shock",
+     "scores": {"severity": 30, "dependency": 22, "deterioration": 12, "waiting": 3, "resource": 7},
+     "survival": 78, "waiting_minutes": 90},
+    {"id": "SIM-2", "name": "Sim B", "diagnosis": "Respiratory failure",
+     "scores": {"severity": 24, "dependency": 18, "deterioration": 10, "waiting": 6, "resource": 8},
+     "survival": 82, "waiting_minutes": 180},
+    {"id": "SIM-3", "name": "Sim C", "diagnosis": "Post-op monitoring",
+     "scores": {"severity": 16, "dependency": 12, "deterioration": 8, "waiting": 8, "resource": 9},
+     "survival": 90, "waiting_minutes": 240},
+]
+
+
+def _sim_rank(patients):
+    ranked = []
+    for p in patients:
+        try:
+            score = api_post("/priority/calculate", p["scores"])["score"]
+        except requests.RequestException:
+            score = sum(p["scores"].values())
+        ranked.append({**p, "score": score})
+    ranked.sort(key=lambda r: (-r["score"], -r["survival"]))
+    for i, r in enumerate(ranked, 1):
+        r["rank"] = i
+    return ranked
+
+
+def simulation_page():
+    st.markdown('<div class="cg-title">CAREGRID</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cg-sub">Simulation Mode (demo)</div>', unsafe_allow_html=True)
+    st.caption(
+        "Synthetic demo scenario only — does NOT use real datasets or touch the live "
+        "patient database. Demonstrates: Patient → Score → Rank → Bed change → Re-rank "
+        "→ Doctor decision → Audit."
+    )
+
+    cols = st.columns(3)
+    start = cols[0].button("▶ Start Simulation", type="primary")
+    step = cols[1].button("⏭ Next Event")
+    reset = cols[2].button("⟲ Reset Simulation")
+
+    if reset:
+        st.session_state.pop("sim", None)
+
+    if start or "sim" not in st.session_state:
+        st.session_state["sim"] = {
+            "patients": [dict(p, scores=dict(p["scores"])) for p in SIM_PATIENTS[:2]],
+            "beds_available": 0,
+            "timeline": ["Simulation started with 2 waiting patients."],
+            "step": 0,
+        }
+
+    sim = st.session_state["sim"]
+
+    if step:
+        s = sim["step"]
+        if s == 0:
+            sim["patients"].append(dict(SIM_PATIENTS[2], scores=dict(SIM_PATIENTS[2]["scores"])))
+            sim["timeline"].append("New patient SIM-3 arrived and was scored + queued.")
+        elif s == 1:
+            for p in sim["patients"]:
+                if p["id"] == "SIM-2":
+                    p["scores"]["deterioration"] = 20
+                    p["survival"] = 60
+            sim["timeline"].append("Deterioration event: SIM-2 deterioration risk ↑ → re-ranked.")
+        elif s == 2:
+            sim["beds_available"] = 1
+            sim["timeline"].append("Bed became available: ICU-07 now free.")
+        elif s == 3:
+            ranked = _sim_rank(sim["patients"])
+            top = ranked[0]
+            sim["timeline"].append(
+                f"Doctor ACCEPTED {top['id']} (Priority #1) → audit event recorded (simulated)."
+            )
+        else:
+            sim["timeline"].append("Scenario complete. Reset to run again.")
+        sim["step"] = min(s + 1, 4)
+
+    st.subheader("Live Queue (simulated)")
+    ranked = _sim_rank(sim["patients"])
+    st.dataframe(
+        pd.DataFrame(
+            [{"Rank": r["rank"], "Patient": r["id"], "Diagnosis": r["diagnosis"],
+              "Score": r["score"], "Survival %": r["survival"],
+              "Waiting (min)": r["waiting_minutes"]} for r in ranked]
+        ),
+        width="stretch", hide_index=True,
+    )
+    st.caption(f"ICU beds available (simulated): {sim['beds_available']}")
+
+    st.subheader("Event Timeline")
+    for i, ev in enumerate(sim["timeline"], 1):
+        st.markdown(f"**{i}.** {ev}")
+
+
 if "role" not in st.session_state:
     role_selector()
 else:
     st.sidebar.markdown("### CareGrid")
     view = st.sidebar.radio(
-        "View", ["Clinical Dashboard", "Analytics / Validation"]
+        "View",
+        [
+            "Clinical Dashboard",
+            "Analytics / Validation",
+            "Capacity Analytics",
+            "Simulation",
+            "CSV Export",
+        ],
     )
     st.sidebar.caption(f"{st.session_state.get('user', '')} · {st.session_state.get('role', '')}")
     st.sidebar.caption("Prototype decision support — clinician remains final decision-maker.")
     if view == "Clinical Dashboard":
         dashboard()
-    else:
+    elif view == "Analytics / Validation":
         analytics_page()
+    elif view == "Capacity Analytics":
+        capacity_page()
+    elif view == "Simulation":
+        simulation_page()
+    else:
+        export_page()

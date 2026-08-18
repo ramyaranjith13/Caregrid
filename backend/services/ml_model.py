@@ -12,7 +12,6 @@ training returns an error asking for the CSV.
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 import numpy as np
 import joblib
@@ -62,14 +61,23 @@ def _is_death_target(name: str) -> bool:
     return any(h in name.lower() for h in ["death", "died", "die", "mortalit", "expired"])
 
 
-def train_survival_model(target_column=None, features=None, test_size: float = 0.25) -> dict:
-    df = load_dataframe("icu_outcome")
+def resolve_dataset_key() -> str:
+    """Prefer the REAL ICU outcome dataset when loaded; else fall back to synthetic."""
+    from .ingestion import load_dataframe as _load
+    if not _load("icu_outcome_real").empty:
+        return "icu_outcome_real"
+    return "icu_outcome"
+
+
+def train_survival_model(target_column=None, features=None, test_size: float = 0.25,
+                         dataset_key=None) -> dict:
+    dataset_key = dataset_key or resolve_dataset_key()
+    df = load_dataframe(dataset_key)
     if df.empty:
         return {
             "status": "error",
             "message": (
-                "ICU outcome dataset is not loaded. Import it first "
-                "(manual CSV upload from Kaggle may be required)."
+                "No ICU outcome dataset is loaded. Import a dataset first."
             ),
         }
 
@@ -84,7 +92,6 @@ def train_survival_model(target_column=None, features=None, test_size: float = 0
     y_raw = df[target].dropna()
     uniques = sorted(pd.unique(y_raw).tolist(), key=lambda v: str(v))
     if set(pd.unique(y_raw)).issubset({0, 1, 0.0, 1.0}):
-        label_map = {0: 0, 1: 0, 0.0: 0, 1.0: 1}
         y_full = df[target].map(lambda v: int(v) if pd.notna(v) else np.nan)
         positive_label = 1
     else:
@@ -97,8 +104,10 @@ def train_survival_model(target_column=None, features=None, test_size: float = 0
         for c in df.columns
         if c != target
         and pd.api.types.is_numeric_dtype(df[c])
-        and not c.lower().endswith("id")
-        and c.lower() != "row_id"
+        and c.lower() not in ("recordid", "record_id", "row_id", "id")
+        and not c.lower().endswith("_id")
+        and not df[c].isna().all()
+        and df[c].nunique(dropna=True) > 1
     ]
     if features:
         num_cols = [c for c in features if c in num_cols]
@@ -123,7 +132,7 @@ def train_survival_model(target_column=None, features=None, test_size: float = 0
         [
             ("impute", SimpleImputer(strategy="median")),
             ("scale", StandardScaler()),
-            ("clf", LogisticRegression(max_iter=1000)),
+            ("clf", LogisticRegression(max_iter=2000, class_weight="balanced")),
         ]
     )
     pipe.fit(X_tr, y_tr)
@@ -177,7 +186,8 @@ def train_survival_model(target_column=None, features=None, test_size: float = 0
     version = f"v{n_prev + 1}"
 
     src = conn.execute(
-        "SELECT source, dataset_version FROM dataset_imports WHERE dataset_key='icu_outcome' ORDER BY id DESC LIMIT 1"
+        "SELECT source, dataset_version FROM dataset_imports WHERE dataset_key=? ORDER BY id DESC LIMIT 1",
+        (dataset_key,),
     ).fetchone()
     dataset_source = src["source"] if src else "unknown"
     dataset_version = src["dataset_version"] if src else "unknown"

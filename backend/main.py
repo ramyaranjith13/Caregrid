@@ -9,6 +9,7 @@ from .services.prioritization import (
     calculate_priority,
     rank_patients,
     score_breakdown_from_patient,
+    care_level_recommendation,
 )
 from .services import ingestion, ml_model, bed_matching
 
@@ -246,6 +247,18 @@ def create_patient(payload: PatientCreate):
         new_value=f"{score}/100",
         decision_maker=payload.decision_maker,
     )
+    care = care_level_recommendation(score, bool(payload.critical))
+    log_audit(
+        conn,
+        event="CARE_LEVEL_RECOMMENDED",
+        event_time=ts,
+        patient_id=payload.id,
+        patient_name=payload.name,
+        diagnosis=payload.diagnosis,
+        recommendation=care["care_level"],
+        new_value=care["care_level"],
+        decision_maker=payload.decision_maker,
+    )
 
     conn.commit()
 
@@ -396,6 +409,22 @@ def update_patient(patient_id: str, payload: PatientUpdate):
             decision_maker=maker,
         )
 
+    if new_score is not None:
+        care = care_level_recommendation(
+            new_score, bool(apply_values.get("critical", current.get("critical", 0)))
+        )
+        log_audit(
+            conn,
+            event="CARE_LEVEL_RECOMMENDED",
+            event_time=ts,
+            patient_id=patient_id,
+            patient_name=p_name,
+            diagnosis=p_diag,
+            recommendation=care["care_level"],
+            new_value=care["care_level"],
+            decision_maker=maker,
+        )
+
     conn.commit()
     conn.close()
 
@@ -508,6 +537,60 @@ def beds_match(patient_id: str):
     if result is None:
         raise HTTPException(status_code=404, detail="Patient not found")
     return result
+
+
+@app.get("/analytics/capacity")
+def analytics_capacity():
+    """Capacity overview: live ICU/step-down bed counts + aggregated weekly
+    demand/refusal from the real operational services_weekly dataset."""
+    conn = get_connection()
+
+    def _counts(table):
+        rows = conn.execute(f"SELECT status, COUNT(*) AS n FROM {table} GROUP BY status").fetchall()
+        d = {r["status"]: r["n"] for r in rows}
+        return {
+            "available": d.get("available", 0),
+            "occupied": d.get("occupied", 0),
+            "preparing": d.get("cleaning", 0),
+        }
+
+    icu = _counts("icu_beds")
+    step_down = _counts("step_down_beds")
+    conn.close()
+
+    df = ingestion.load_dataframe("services_weekly")
+    services = []
+    if not df.empty:
+        agg = (
+            df.groupby("service")
+            .agg(
+                avg_available_beds=("available_beds", "mean"),
+                total_requested=("patients_request", "sum"),
+                total_admitted=("patients_admitted", "sum"),
+                total_refused=("patients_refused", "sum"),
+            )
+            .reset_index()
+        )
+        for _, r in agg.iterrows():
+            req = float(r["total_requested"]) or 1.0
+            services.append(
+                {
+                    "service": r["service"],
+                    "avg_available_beds": round(float(r["avg_available_beds"]), 1),
+                    "total_requested": int(r["total_requested"]),
+                    "total_admitted": int(r["total_admitted"]),
+                    "total_refused": int(r["total_refused"]),
+                    "refusal_rate_pct": round(float(r["total_refused"]) / req * 100, 1),
+                }
+            )
+
+    return {
+        "loaded": bool(services),
+        "icu": icu,
+        "step_down": step_down,
+        "services": services,
+        "note": "Weekly demand/refusal aggregated from the real operational dataset (services_weekly).",
+    }
 
 
 # ----------------------------------------------------------------------------

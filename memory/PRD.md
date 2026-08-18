@@ -44,16 +44,21 @@ POST `/datasets/{key}/import`, `/ml/train`, `/ml/estimate`.
 - Frontend: Streamlit `AppTest` — role gating (Doctor write vs Nurse/Coord/Admin view-only), dashboard render, analytics render + metrics. Files: `tests/test_frontend_apptest.py`, `tests/test_analytics_apptest.py`.
 - NOTE: Streamlit does not render through the preview proxy (websocket) — verified via AppTest instead. Run locally: `uvicorn backend.main:app` + `streamlit run app.py`.
 
-## Implemented — Real dataset ingestion + Bed Matching (2026-08-18, session 2)
-User decisions: keep survival model on SYNTHETIC v1 (no real ICU-outcome dataset was provided); ingest the 4 real uploaded CSVs into separate tables; build ONLY Bed Matching this round.
+## Implemented — Session 2: Real ops datasets + Bed Matching (2026-08-18)
+User decisions: keep survival model synthetic that round; ingest 4 real uploaded CSVs into separate tables; build ONLY Bed Matching.
 
-- **Real datasets uploaded** (NOT the original Kaggle sets): `patients.csv` (1000), `services_weekly.csv` (208), `staff.csv` (110), `staff_schedule.csv` (6552). No survival/mortality/severity columns → survival model stays synthetic.
-- **Ingested** into dedicated tables via existing column-agnostic pipeline: `ops_patients`, `services_weekly_capacity`, `staff_directory`, `staff_schedule` — kept fully separate from live `patients`. Idempotent (SHA-256). Registry in `ingestion.py` reworked to explicit filenames + `category` (operational vs ml_synthetic). Analytics "Dataset Status" shows the 4 real operational datasets; survival section shows synthetic training-data status + v1 model.
-- **Bed Matching** (`backend/services/bed_matching.py`, `GET /beds/match/{patient_id}`): compares patient required_resources vs available ICU + step-down beds (equipment/isolation/compatibility) → HIGH/MEDIUM/LOW with matched/missing + reason. Read-only, never auto-assigns; `best_match=None` when required resources missing. UI: "Bed Match" block in Selected Patient.
-- **Verified**: testing_agent 19/19 backend pass (`backend/tests/test_caregrid_v2.py`); Streamlit AppTests pass.
+- **Real ops datasets**: `patients.csv` (1000), `services_weekly.csv` (208), `staff.csv` (110), `staff_schedule.csv` (6552) → tables `ops_patients`, `services_weekly_capacity`, `staff_directory`, `staff_schedule`. Idempotent (SHA-256), separate from live `patients`.
+- **Bed Matching** (`backend/services/bed_matching.py`, `GET /beds/match/{patient_id}`): required_resources vs available ICU + step-down beds → HIGH/MEDIUM/LOW + missing + reason. Read-only; `best_match=None` on incomplete data.
 
-### Still deferred (user said "just build bed matching" this round)
-Care Level recommendation, Simulation Mode, CSV Export, Dashboard reorg, full 15-point regression.
+## Implemented — Session 3: FINAL completion (2026-08-18)
+- **Real ICU outcome dataset**: uploaded X_train_2025.csv + y_train_2025.csv (PhysioNet death-classification), merged → `data/raw/icu_outcome_real.csv`, table `icu_outcome_real` (3600 rows, target `in_hospital_death`). Category ml_real.
+- **Real survival model (v2)**: LogisticRegression (median impute + scale, class_weight=balanced), 119 features (recordid/id/all-NaN/constant excluded), 2700/900 split. Real metrics: Acc 0.78, Precision 0.36, Recall 0.72, Specificity 0.79, ROC-AUC 0.846. Supporting estimate only. Model prefers real dataset over synthetic (`resolve_dataset_key`).
+- **Care Level** (`prioritization.care_level_recommendation`, prototype thresholds): ICU Candidate / Step-Down Candidate / Ward-Continue Care; shown in Selected Patient; logged as CARE_LEVEL_RECOMMENDED on create/update.
+- **Capacity Analytics** (`GET /analytics/capacity` + page): live ICU/step-down counts + real services_weekly aggregation (admitted/refused/refusal-rate by service).
+- **Simulation Mode** (frontend, synthetic only, never touches live DB): Start/Next/Reset, event timeline, live re-ranking via `/priority/calculate`.
+- **CSV Export** page: priority queue, ranking summary, audit trail, ICU beds, step-down beds, capacity summary (all roles).
+- **Dashboard polish**: 6-metric top row incl. Step-Down Available + alerts banner; step-down bed table; sidebar nav (Dashboard / Analytics / Capacity / Simulation / Export).
+- **Verified**: testing_agent 35/35 backend pass; Streamlit AppTests (dashboard, analytics, all pages) pass; pyflakes clean; `/health` + `/docs` 200; requirements valid.
 
 ## Backlog (not yet built)
 - P1: Step-down / care-level recommendation UI, per-patient bed compatibility matching, near-tie UI explanation.

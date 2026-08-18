@@ -192,7 +192,7 @@ def test_ml_status(client):
     assert r.status_code == 200
     data = r.json()
     assert data.get("trained") is True
-    assert data.get("model_version") == "v1"
+    assert isinstance(data.get("model_version"), str) and data["model_version"].startswith("v")
 
 
 def test_ml_validation(client):

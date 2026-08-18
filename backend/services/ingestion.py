@@ -54,13 +54,22 @@ DATASETS = {
         "source": "Uploaded operational dataset (staff_schedule.csv)",
     },
     # Synthetic dataset retained ONLY to back the clearly-labelled prototype
-    # survival model (no real ICU-outcome/mortality dataset was provided).
+    # survival model when no real ICU-outcome dataset is available.
     "icu_outcome": {
         "table": "icu_outcome_dataset",
-        "title": "ICU Outcome — SYNTHETIC (survival model)",
+        "title": "ICU Outcome — SYNTHETIC (fallback)",
         "filename": "SYNTHETIC_icu_outcome.csv",
         "category": "ml_synthetic",
         "source": "SYNTHETIC DEMO DATA (not real patients)",
+    },
+    # Real ICU Patient Outcome Prediction dataset (uploaded X_train + y_train,
+    # merged, target = In-hospital_death). Kept separate from live patients.
+    "icu_outcome_real": {
+        "table": "icu_outcome_real",
+        "title": "ICU Patient Outcome Prediction (REAL)",
+        "filename": "icu_outcome_real.csv",
+        "category": "ml_real",
+        "source": "Kaggle: fdemoribajolin/deathclassification-icu (uploaded X_train_2025 + y_train_2025)",
     },
 }
 

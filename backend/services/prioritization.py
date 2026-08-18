@@ -108,6 +108,24 @@ def _compare(a: Dict[str, Any], b: Dict[str, Any]) -> int:
     return 0
 
 
+def care_level_recommendation(priority_score: int, critical: bool) -> dict:
+    """Prototype disposition thresholds — NOT a clinical guideline.
+
+    Supporting recommendation only; the doctor decides and CareGrid never
+    auto-transfers, discharges, or allocates.
+    """
+    if critical or priority_score >= 70:
+        level = "ICU Candidate"
+    elif priority_score >= 45:
+        level = "Step-Down Candidate"
+    else:
+        level = "Ward / Continue Care"
+    return {
+        "care_level": level,
+        "care_level_note": "Prototype disposition threshold — not a clinical guideline. Clinician review required.",
+    }
+
+
 def rank_patients(patients):
     enriched = []
     for patient in patients:
@@ -118,6 +136,8 @@ def rank_patients(patients):
         row["score_explanation"] = explain_score(scores)
         row["missing_data"] = missing_clinical_fields(row)
         row["data_complete"] = len(row["missing_data"]) == 0
+        care = care_level_recommendation(row["priority_score"], bool(row.get("critical", 0)))
+        row.update(care)
         enriched.append(row)
 
     enriched.sort(key=cmp_to_key(_compare))
