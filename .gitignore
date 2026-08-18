@@ -9,3 +9,9 @@ data/processed/
 .env
 backend/.env
 memory/test_credentials.md
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
