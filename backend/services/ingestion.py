@@ -23,17 +23,44 @@ RAW_DIR = BASE_DIR / "data" / "raw"
 PROCESSED_DIR = BASE_DIR / "data" / "processed"
 
 DATASETS = {
-    "hospital_beds": {
-        "table": "hospital_bed_dataset",
-        "title": "Hospital Beds Management — Synthetic",
-        "url": "https://www.kaggle.com/datasets/jaderz/hospitalbeds-management",
-        "patterns": ["hospital", "bed"],
+    # Real operational datasets (uploaded by the user). Kept fully separate
+    # from the LIVE CareGrid patient table.
+    "ops_patients": {
+        "table": "ops_patients",
+        "title": "Hospital Operations — Patient Records",
+        "filename": "patients.csv",
+        "category": "operational",
+        "source": "Uploaded operational dataset (patients.csv)",
     },
+    "services_weekly": {
+        "table": "services_weekly_capacity",
+        "title": "Weekly Service Capacity & Demand",
+        "filename": "services_weekly.csv",
+        "category": "operational",
+        "source": "Uploaded operational dataset (services_weekly.csv)",
+    },
+    "staff": {
+        "table": "staff_directory",
+        "title": "Staff Directory",
+        "filename": "staff.csv",
+        "category": "operational",
+        "source": "Uploaded operational dataset (staff.csv)",
+    },
+    "staff_schedule": {
+        "table": "staff_schedule",
+        "title": "Staff Weekly Schedule",
+        "filename": "staff_schedule.csv",
+        "category": "operational",
+        "source": "Uploaded operational dataset (staff_schedule.csv)",
+    },
+    # Synthetic dataset retained ONLY to back the clearly-labelled prototype
+    # survival model (no real ICU-outcome/mortality dataset was provided).
     "icu_outcome": {
         "table": "icu_outcome_dataset",
-        "title": "ICU Patient Outcome Prediction",
-        "url": "https://www.kaggle.com/datasets/fdemoribajolin/deathclassification-icu",
-        "patterns": ["icu", "death", "outcome", "mortality"],
+        "title": "ICU Outcome — SYNTHETIC (survival model)",
+        "filename": "SYNTHETIC_icu_outcome.csv",
+        "category": "ml_synthetic",
+        "source": "SYNTHETIC DEMO DATA (not real patients)",
     },
 }
 
@@ -117,19 +144,18 @@ def _file_hash(path) -> str:
 
 def find_raw_file(dataset_key: str):
     RAW_DIR.mkdir(parents=True, exist_ok=True)
-    patterns = DATASETS[dataset_key]["patterns"]
-    csvs = sorted(RAW_DIR.glob("*.csv"))
-    for p in csvs:
-        low = p.name.lower()
-        if any(pat in low for pat in patterns):
+    fname = DATASETS[dataset_key].get("filename")
+    if fname:
+        p = RAW_DIR / fname
+        if p.exists():
             return p
     return None
 
 
 def _source_label(dataset_key: str, filename: str) -> str:
     if filename.upper().startswith("SYNTHETIC"):
-        return "SYNTHETIC DEMO DATA (not the Kaggle dataset — replace with real Kaggle CSV)"
-    return DATASETS[dataset_key]["url"]
+        return "SYNTHETIC DEMO DATA (not real patients)"
+    return DATASETS[dataset_key].get("source", filename)
 
 
 def import_dataset(dataset_key: str, path=None, dataset_version: str = "v1") -> dict:
@@ -146,9 +172,8 @@ def import_dataset(dataset_key: str, path=None, dataset_version: str = "v1") -> 
         return {
             "status": "missing",
             "message": (
-                f"No CSV found in data/raw for '{dataset_key}'. "
-                f"Manual upload required — download from {cfg['url']} and place the "
-                f"CSV in data/raw/."
+                f"No CSV found in data/raw for '{dataset_key}' "
+                f"(expected {cfg.get('filename')}). Upload the file to data/raw/."
             ),
         }
 
@@ -251,14 +276,15 @@ def dataset_status() -> dict:
             ).fetchone()
         out[key] = {
             "title": cfg["title"],
-            "url": cfg["url"],
+            "category": cfg.get("category", "operational"),
             "table": table,
             "loaded": bool(exists and rows > 0),
             "rows": rows,
-            "source": meta["source"] if meta else None,
+            "source": (meta["source"] if meta else cfg.get("source")),
             "version": meta["dataset_version"] if meta else None,
             "imported_at": meta["imported_at"] if meta else None,
             "rejected_rows": meta["rejected_rows"] if meta else None,
+            "filename": cfg.get("filename"),
         }
     conn.close()
     return out

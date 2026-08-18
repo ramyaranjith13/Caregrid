@@ -351,6 +351,63 @@ def audit_trail_section():
     st.dataframe(df, width="stretch", hide_index=True)
 
 
+def bed_match_section(patient_id: str):
+    """Show compatible ICU / step-down beds for the selected patient.
+
+    Supporting suggestion only — CareGrid never auto-assigns beds.
+    """
+    st.markdown("#### Bed Match")
+    try:
+        match = api_get(f"/beds/match/{patient_id}")
+    except requests.RequestException:
+        st.warning("Unable to load bed match.")
+        return
+
+    st.caption(
+        "System suggestion only — CareGrid does NOT automatically assign beds. "
+        "The doctor makes the final decision."
+    )
+    if not match["required_resources"]:
+        st.warning(
+            "No required resources specified for this patient — bed match "
+            "cannot be assessed reliably. Complete the patient's data."
+        )
+    else:
+        st.write("**Required resources:** " + ", ".join(match["required_resources"]))
+
+    badge = {"HIGH": "🟢 HIGH", "MEDIUM": "🟡 MEDIUM", "LOW": "🔴 LOW"}
+
+    for title, key in [("ICU Beds", "icu_matches"), ("Step-Down Beds", "step_down_matches")]:
+        st.markdown(f"**{title}**")
+        beds = match[key]
+        if not beds:
+            st.info(f"No available {title.lower()} at the moment.")
+            continue
+        for b in beds:
+            with st.container(border=True):
+                st.markdown(
+                    f"**{b['bed_id']}** · {str(b['status']).upper()} · "
+                    f"MATCH: {badge[b['match_level']]}"
+                )
+                mc1, mc2 = st.columns(2)
+                with mc1:
+                    if b["matched"]:
+                        st.success("✓ " + ", ".join(b["matched"]))
+                    else:
+                        st.write("No required resource matched")
+                with mc2:
+                    if b["missing"]:
+                        st.error("✗ Missing: " + ", ".join(b["missing"]))
+                    elif match["required_resources"]:
+                        st.success("All required resources present")
+                st.caption(
+                    f"Equipment: {', '.join(b['equipment']) or '—'} · "
+                    f"Isolation: {b['isolation'] or '—'} · "
+                    f"Compatibility: {b['compatibility'] or '—'}"
+                )
+                st.caption(b["reason"])
+
+
 def dashboard():
     role = st.session_state.role
     user = st.session_state.user
@@ -623,6 +680,9 @@ def dashboard():
             assessment_update(selected, user)
 
         st.divider()
+        bed_match_section(selected["id"])
+
+        st.divider()
         what_changed(selected["id"])
 
     st.divider()
@@ -680,38 +740,53 @@ def analytics_page():
         return
 
     st.subheader("Dataset Status")
-    cols = st.columns(2)
-    for col, (key, info) in zip(cols, status.items()):
-        with col:
-            loaded = info["loaded"]
-            st.markdown(f"**{info['title']}**")
-            if loaded:
-                st.success(f"Loaded · {info['rows']} rows")
-                st.caption(f"Source: {info['source']}")
-                st.caption(f"Version: {info['version']} · Imported: {info['imported_at']}")
-            else:
-                st.error("Not Loaded")
-                st.caption(f"Kaggle source: {info['url']}")
-                st.caption("Manual CSV upload to data/raw/ required (Kaggle needs auth).")
+    st.caption(
+        "LIVE / DEMO clinical data is separate from these TRAINING / OPERATIONAL "
+        "datasets. Operational datasets are real uploads; the survival model uses "
+        "clearly-labelled SYNTHETIC data (no real ICU-outcome dataset was provided)."
+    )
+    operational = {k: v for k, v in status.items() if v.get("category") == "operational"}
+    ml_syn = {k: v for k, v in status.items() if v.get("category") == "ml_synthetic"}
 
-            if is_doctor:
-                if st.button(f"Import {key}", key=f"imp_{key}"):
-                    try:
-                        res = api_post(f"/datasets/{key}/import", {})
-                        if res.get("status") == "ok":
-                            st.success(
-                                f"Imported {res['imported_rows']} rows "
-                                f"({res['rejected_rows']} rejected)."
-                            )
-                        else:
-                            st.warning(res.get("message", "Import did not run."))
-                        st.rerun()
-                    except requests.HTTPError as exc:
-                        st.error(f"Import failed: {exc.response.text}")
+    st.markdown("**Operational datasets (real uploads)**")
+    op_items = list(operational.items())
+    for i in range(0, len(op_items), 2):
+        row = op_items[i:i + 2]
+        cols = st.columns(2)
+        for col, (key, info) in zip(cols, row):
+            with col:
+                st.markdown(f"**{info['title']}**")
+                if info["loaded"]:
+                    st.success(f"Loaded · {info['rows']} rows")
+                    st.caption(f"Source: {info['source']}")
+                    st.caption(f"File: {info['filename']} · Imported: {info['imported_at']}")
+                else:
+                    st.error("Not Loaded")
+                    st.caption(f"Expected file in data/raw/: {info['filename']}")
+                if is_doctor:
+                    if st.button(f"Import {key}", key=f"imp_{key}"):
+                        try:
+                            res = api_post(f"/datasets/{key}/import", {})
+                            if res.get("status") == "ok":
+                                st.success(
+                                    f"Imported {res['imported_rows']} rows "
+                                    f"({res['rejected_rows']} rejected)."
+                                )
+                            else:
+                                st.warning(res.get("message", "Import did not run."))
+                            st.rerun()
+                        except requests.HTTPError as exc:
+                            st.error(f"Import failed: {exc.response.text}")
 
     st.divider()
 
     st.subheader("Survival Model")
+    for key, info in ml_syn.items():
+        tag = "Loaded" if info["loaded"] else "Not Loaded"
+        st.caption(
+            f"Training data: {info['title']} — {tag} ({info['rows']} rows) · "
+            f"{info['source']}"
+        )
     mcol1, mcol2 = st.columns([1, 2])
     with mcol1:
         if ml.get("trained"):

@@ -10,7 +10,7 @@ from .services.prioritization import (
     rank_patients,
     score_breakdown_from_patient,
 )
-from .services import ingestion, ml_model
+from .services import ingestion, ml_model, bed_matching
 
 app = FastAPI(title="CareGrid API", version="0.3.0")
 
@@ -502,6 +502,14 @@ def step_down_beds():
     return [dict(r) for r in rows]
 
 
+@app.get("/beds/match/{patient_id}")
+def beds_match(patient_id: str):
+    result = bed_matching.match_beds_for_patient(patient_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    return result
+
+
 # ----------------------------------------------------------------------------
 # Dataset ingestion + ML validation (CareGrid V2)
 # ----------------------------------------------------------------------------
@@ -532,8 +540,8 @@ def datasets_inspect(dataset_key: str):
         return {
             "status": "missing",
             "message": (
-                f"No CSV found in data/raw for '{dataset_key}'. "
-                f"Manual upload required from {ingestion.DATASETS[dataset_key]['url']}."
+                f"No CSV found in data/raw for '{dataset_key}' "
+                f"(expected {ingestion.DATASETS[dataset_key].get('filename')})."
             ),
         }
     return {"status": "ok", "inspection": ingestion.inspect_csv(path)}

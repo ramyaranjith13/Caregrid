@@ -44,6 +44,17 @@ POST `/datasets/{key}/import`, `/ml/train`, `/ml/estimate`.
 - Frontend: Streamlit `AppTest` — role gating (Doctor write vs Nurse/Coord/Admin view-only), dashboard render, analytics render + metrics. Files: `tests/test_frontend_apptest.py`, `tests/test_analytics_apptest.py`.
 - NOTE: Streamlit does not render through the preview proxy (websocket) — verified via AppTest instead. Run locally: `uvicorn backend.main:app` + `streamlit run app.py`.
 
+## Implemented — Real dataset ingestion + Bed Matching (2026-08-18, session 2)
+User decisions: keep survival model on SYNTHETIC v1 (no real ICU-outcome dataset was provided); ingest the 4 real uploaded CSVs into separate tables; build ONLY Bed Matching this round.
+
+- **Real datasets uploaded** (NOT the original Kaggle sets): `patients.csv` (1000), `services_weekly.csv` (208), `staff.csv` (110), `staff_schedule.csv` (6552). No survival/mortality/severity columns → survival model stays synthetic.
+- **Ingested** into dedicated tables via existing column-agnostic pipeline: `ops_patients`, `services_weekly_capacity`, `staff_directory`, `staff_schedule` — kept fully separate from live `patients`. Idempotent (SHA-256). Registry in `ingestion.py` reworked to explicit filenames + `category` (operational vs ml_synthetic). Analytics "Dataset Status" shows the 4 real operational datasets; survival section shows synthetic training-data status + v1 model.
+- **Bed Matching** (`backend/services/bed_matching.py`, `GET /beds/match/{patient_id}`): compares patient required_resources vs available ICU + step-down beds (equipment/isolation/compatibility) → HIGH/MEDIUM/LOW with matched/missing + reason. Read-only, never auto-assigns; `best_match=None` when required resources missing. UI: "Bed Match" block in Selected Patient.
+- **Verified**: testing_agent 19/19 backend pass (`backend/tests/test_caregrid_v2.py`); Streamlit AppTests pass.
+
+### Still deferred (user said "just build bed matching" this round)
+Care Level recommendation, Simulation Mode, CSV Export, Dashboard reorg, full 15-point regression.
+
 ## Backlog (not yet built)
 - P1: Step-down / care-level recommendation UI, per-patient bed compatibility matching, near-tie UI explanation.
 - P1: Simulation mode; capacity forecast (ICU + step-down); export reports (CSV).
