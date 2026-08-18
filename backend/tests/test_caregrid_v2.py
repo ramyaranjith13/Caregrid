@@ -10,6 +10,20 @@ BASE_URL = os.environ.get("CAREGRID_API_URL", "http://127.0.0.1:8000").rstrip("/
 def client():
     s = requests.Session()
     s.headers.update({"Content-Type": "application/json"})
+    # Authenticate as a Doctor so protected write endpoints are exercised.
+    demo_pw = None
+    env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+    try:
+        for line in open(env_path):
+            if line.startswith("SEED_DEMO_PASSWORD"):
+                demo_pw = line.split('"')[1]
+    except OSError:
+        pass
+    if demo_pw:
+        r = s.post(f"{BASE_URL}/auth/login",
+                   json={"email": "doctor1@caregrid.local", "password": demo_pw})
+        if r.status_code == 200:
+            s.headers.update({"Authorization": f"Bearer {r.json()['token']}"})
     return s
 
 

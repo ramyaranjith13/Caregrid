@@ -32,51 +32,72 @@ st.markdown(
 )
 
 
+def _auth_headers():
+    token = st.session_state.get("token")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _handle_auth_error(exc):
+    if isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code == 401:
+        for k in ("token", "auth_user"):
+            st.session_state.pop(k, None)
+        st.warning("Session expired. Please log in again.")
+        st.rerun()
+
+
 def api_get(path: str):
-    response = requests.get(f"{API_URL}{path}", timeout=6)
+    response = requests.get(f"{API_URL}{path}", headers=_auth_headers(), timeout=8)
     response.raise_for_status()
     return response.json()
 
 
 def api_post(path: str, payload: dict):
-    response = requests.post(f"{API_URL}{path}", json=payload, timeout=6)
+    response = requests.post(f"{API_URL}{path}", json=payload, headers=_auth_headers(), timeout=15)
     response.raise_for_status()
     return response.json()
 
 
 def api_patch(path: str, payload: dict):
-    response = requests.patch(f"{API_URL}{path}", json=payload, timeout=6)
+    response = requests.patch(f"{API_URL}{path}", json=payload, headers=_auth_headers(), timeout=10)
     response.raise_for_status()
     return response.json()
 
 
-def role_selector():
+def login_page():
     st.markdown('<div class="cg-title">CAREGRID</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="cg-sub">ICU Prioritization & Decision Support</div>',
         unsafe_allow_html=True,
     )
     st.divider()
-    st.markdown("### Select your role")
-
-    role = st.selectbox(
-        "Role",
-        ["Doctor", "Nurse", "Coordinator", "Administrator"],
+    st.markdown("### Sign in")
+    with st.form("login_form"):
+        email = st.text_input("Email", key="login_email", placeholder="you@caregrid.local")
+        password = st.text_input("Password", type="password", key="login_password")
+        submitted = st.form_submit_button("LOGIN", type="primary")
+    if submitted:
+        if not email or not password:
+            st.error("Email and password are required.")
+            return
+        try:
+            result = api_post("/auth/login", {"email": email, "password": password})
+            st.session_state["token"] = result["token"]
+            st.session_state["auth_user"] = result["user"]
+            st.rerun()
+        except requests.HTTPError as exc:
+            detail = "Login failed."
+            try:
+                detail = exc.response.json().get("detail", detail)
+            except Exception:
+                pass
+            st.error(detail)
+        except requests.RequestException:
+            st.error("CareGrid API is not reachable. Please try again.")
+    st.caption(
+        "Individual accounts are authenticated (bcrypt-hashed). Contact your "
+        "administrator for access. Doctors have clinical write access; Nurse, "
+        "Coordinator and Administrator are view-only for clinical actions."
     )
-
-    name_map = {
-        "Doctor": "Dr. S. Krishnan",
-        "Nurse": "Nurse on Duty",
-        "Coordinator": "ICU Coordinator",
-        "Administrator": "Hospital Administrator",
-    }
-
-    if st.button("ENTER CAREGRID", type="primary", width="stretch"):
-        st.session_state.role = role
-        st.session_state.user = name_map[role]
-        st.rerun()
-
-    st.info("Doctor has decision access. Other roles are view-only in the MVP.")
 
 
 def registration_form(user: str):
@@ -427,8 +448,9 @@ def dashboard():
     with c2:
         st.success("SYSTEM ACTIVE")
     with c3:
-        if st.button("Switch Role"):
-            st.session_state.clear()
+        if st.button("Logout"):
+            for k in ("token", "auth_user", "role", "user", "sim"):
+                st.session_state.pop(k, None)
             st.rerun()
 
     try:
@@ -1119,22 +1141,118 @@ def simulation_page():
         st.markdown(f"**{i}.** {ev}")
 
 
-if "role" not in st.session_state:
-    role_selector()
-else:
-    st.sidebar.markdown("### CareGrid")
-    view = st.sidebar.radio(
-        "View",
-        [
-            "Clinical Dashboard",
-            "Analytics / Validation",
-            "Capacity Analytics",
-            "Simulation",
-            "CSV Export",
-        ],
+def admin_users_page():
+    user = st.session_state["auth_user"]
+    st.markdown('<div class="cg-title">CAREGRID</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cg-sub">User Management (Administrator)</div>', unsafe_allow_html=True)
+    if user["role"] != "Administrator":
+        st.error("Access Denied — Administrator only.")
+        return
+
+    st.subheader("Create User")
+    with st.form("create_user_form", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            full_name = st.text_input("Full name")
+            email = st.text_input("Email")
+        with c2:
+            role = st.selectbox("Role", ["Doctor", "Nurse", "Coordinator", "Administrator"])
+            department = st.text_input("Department", value="")
+        with c3:
+            password = st.text_input("Temporary password", type="password")
+            active = st.checkbox("Active", value=True)
+        if st.form_submit_button("Create User", type="primary"):
+            try:
+                created = api_post("/users", {
+                    "full_name": full_name, "email": email, "password": password,
+                    "role": role, "department": department, "active": active,
+                })
+                st.success(f"Created {created['email']} ({created['role']}).")
+                st.rerun()
+            except requests.HTTPError as exc:
+                st.error(exc.response.json().get("detail", "Create failed."))
+
+    st.divider()
+    st.subheader("Users")
+    try:
+        users = api_get("/users")
+    except requests.RequestException:
+        st.error("Unable to load users."); return
+    st.dataframe(
+        pd.DataFrame([{k: u[k] for k in ["full_name", "email", "role", "department", "active", "last_login"]} for u in users]),
+        width="stretch", hide_index=True,
     )
-    st.sidebar.caption(f"{st.session_state.get('user', '')} · {st.session_state.get('role', '')}")
+
+    st.subheader("Manage a User")
+    emails = [u["email"] for u in users]
+    sel = st.selectbox("Select user", emails)
+    target = next(u for u in users if u["email"] == sel)
+    mc1, mc2, mc3 = st.columns(3)
+    with mc1:
+        new_active = st.checkbox("Active", value=bool(target["active"]), key="mng_active")
+        new_role = st.selectbox("Role", ["Doctor", "Nurse", "Coordinator", "Administrator"],
+                                index=["Doctor", "Nurse", "Coordinator", "Administrator"].index(target["role"]),
+                                key="mng_role")
+    with mc2:
+        new_name = st.text_input("Full name", value=target["full_name"], key="mng_name")
+        new_dept = st.text_input("Department", value=target.get("department", "") or "", key="mng_dept")
+    with mc3:
+        new_pw = st.text_input("Reset password to", type="password", key="mng_pw")
+    b1, b2 = st.columns(2)
+    if b1.button("Save changes"):
+        try:
+            api_patch(f"/users/{target['user_id']}", {
+                "full_name": new_name, "department": new_dept,
+                "role": new_role, "active": new_active,
+            })
+            st.success("User updated."); st.rerun()
+        except requests.HTTPError as exc:
+            st.error(exc.response.json().get("detail", "Update failed."))
+    if b2.button("Reset password"):
+        if not new_pw:
+            st.error("Enter a new password.")
+        else:
+            try:
+                api_post(f"/users/{target['user_id']}/reset-password", {"new_password": new_pw})
+                st.success("Password reset.")
+            except requests.HTTPError as exc:
+                st.error(exc.response.json().get("detail", "Reset failed."))
+
+
+if "token" not in st.session_state or "auth_user" not in st.session_state:
+    login_page()
+else:
+    _u = st.session_state["auth_user"]
+    st.session_state["role"] = _u["role"]
+    st.session_state["user"] = _u["full_name"]
+
+    st.sidebar.markdown("### CareGrid")
+    st.sidebar.markdown(
+        f"**Name**\n\n{_u['full_name']}\n\n**Email**\n\n{_u['email']}\n\n"
+        f"**Role**\n\n{_u['role']}\n\n**Department**\n\n{_u.get('department') or '—'}"
+    )
+    if st.sidebar.button("Logout", type="primary"):
+        try:
+            api_post("/auth/logout", {})
+        except requests.RequestException:
+            pass
+        for k in ("token", "auth_user", "role", "user", "sim"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
+    st.sidebar.divider()
+    pages = [
+        "Clinical Dashboard",
+        "Analytics / Validation",
+        "Capacity Analytics",
+        "Simulation",
+        "CSV Export",
+    ]
+    if _u["role"] == "Administrator":
+        pages.append("User Management")
+    view = st.sidebar.radio("View", pages)
     st.sidebar.caption("Prototype decision support — clinician remains final decision-maker.")
+
     if view == "Clinical Dashboard":
         dashboard()
     elif view == "Analytics / Validation":
@@ -1143,5 +1261,7 @@ else:
         capacity_page()
     elif view == "Simulation":
         simulation_page()
-    else:
+    elif view == "CSV Export":
         export_page()
+    else:
+        admin_users_page()

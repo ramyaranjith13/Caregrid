@@ -1,7 +1,13 @@
+import os
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, Field
 
 from .database import get_connection, init_db
@@ -12,8 +18,9 @@ from .services.prioritization import (
     care_level_recommendation,
 )
 from .services import ingestion, ml_model, bed_matching
+from . import auth
 
-app = FastAPI(title="CareGrid API", version="0.3.0")
+app = FastAPI(title="CareGrid API", version="0.4.0")
 
 
 class PatientCreate(BaseModel):
@@ -97,6 +104,8 @@ def log_audit(
     decision: Optional[str] = None,
     decision_maker: Optional[str] = None,
     reason: Optional[str] = None,
+    actor_email: Optional[str] = None,
+    actor_role: Optional[str] = None,
 ) -> None:
     """Central audit writer. Every mutation should funnel through here."""
     conn.execute(
@@ -104,9 +113,9 @@ def log_audit(
         INSERT INTO audit_logs(
             event_time, patient_id, patient_name, diagnosis, event,
             previous_value, new_value, recommendation, decision,
-            decision_maker, reason
+            decision_maker, reason, actor_email, actor_role
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event_time or _now(),
@@ -120,6 +129,8 @@ def log_audit(
             decision,
             decision_maker,
             reason,
+            actor_email,
+            actor_role,
         ),
     )
 
@@ -143,6 +154,105 @@ def _waiting_rank_map(conn):
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    auth.seed_users()
+
+
+# ----------------------------------------------------------------------------
+# Authentication
+# ----------------------------------------------------------------------------
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserCreate(BaseModel):
+    full_name: str
+    email: str
+    password: str
+    role: str
+    department: str = ""
+    active: bool = True
+
+
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    department: Optional[str] = None
+    role: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class PasswordReset(BaseModel):
+    new_password: str
+
+
+@app.post("/auth/login")
+def auth_login(payload: LoginRequest):
+    return auth.authenticate(payload.email, payload.password)
+
+
+@app.get("/auth/me")
+def auth_me(user: dict = Depends(auth.get_current_user)):
+    return user
+
+
+@app.post("/auth/logout")
+def auth_logout(user: dict = Depends(auth.get_current_user)):
+    # Stateless JWT: the client discards the token. Endpoint confirms identity.
+    return {"message": "logged out"}
+
+
+@app.get("/users")
+def users_list(admin: dict = Depends(auth.require_role("Administrator"))):
+    return auth.list_users()
+
+
+@app.post("/users")
+def users_create(payload: UserCreate, admin: dict = Depends(auth.require_role("Administrator"))):
+    created = auth.create_user(
+        payload.full_name, payload.email, payload.password,
+        payload.role, payload.department, payload.active,
+    )
+    conn = get_connection()
+    log_audit(
+        conn, event="USER_CREATED", patient_id=None,
+        new_value=f"{created['email']} ({created['role']})",
+        decision_maker=admin["full_name"], actor_email=admin["email"], actor_role=admin["role"],
+    )
+    conn.commit(); conn.close()
+    return created
+
+
+@app.patch("/users/{user_id}")
+def users_update(user_id: str, payload: UserUpdate,
+                 admin: dict = Depends(auth.require_role("Administrator"))):
+    updated = auth.update_user(
+        user_id, full_name=payload.full_name, department=payload.department,
+        role=payload.role, active=payload.active,
+    )
+    conn = get_connection()
+    log_audit(
+        conn, event="USER_UPDATED",
+        new_value=f"{updated['email']} active={updated['active']} role={updated['role']}",
+        decision_maker=admin["full_name"], actor_email=admin["email"], actor_role=admin["role"],
+    )
+    conn.commit(); conn.close()
+    return updated
+
+
+@app.post("/users/{user_id}/reset-password")
+def users_reset_password(user_id: str, payload: PasswordReset,
+                         admin: dict = Depends(auth.require_role("Administrator"))):
+    result = auth.reset_password(user_id, payload.new_password)
+    conn = get_connection()
+    log_audit(
+        conn, event="USER_PASSWORD_RESET",
+        new_value=f"user_id={user_id}",
+        decision_maker=admin["full_name"], actor_email=admin["email"], actor_role=admin["role"],
+    )
+    conn.commit(); conn.close()
+    return result
 
 
 @app.get("/health")
@@ -184,7 +294,7 @@ def beds():
 
 
 @app.post("/patients")
-def create_patient(payload: PatientCreate):
+def create_patient(payload: PatientCreate, user: dict = Depends(auth.require_role("Doctor"))):
     conn = get_connection()
 
     existing = conn.execute(
@@ -225,6 +335,9 @@ def create_patient(payload: PatientCreate):
         raise HTTPException(status_code=400, detail=f"Unable to create patient: {exc}")
 
     ts = _now()
+    actor_name = user["full_name"]
+    actor_email = user["email"]
+    actor_role = user["role"]
     score = calculate_priority(score_breakdown_from_patient(payload.model_dump()))
 
     log_audit(
@@ -235,7 +348,7 @@ def create_patient(payload: PatientCreate):
         patient_name=payload.name,
         diagnosis=payload.diagnosis,
         new_value=f"Registered (age {payload.age}, critical={bool(payload.critical)})",
-        decision_maker=payload.decision_maker,
+        decision_maker=actor_name, actor_email=actor_email, actor_role=actor_role,
     )
     log_audit(
         conn,
@@ -245,7 +358,7 @@ def create_patient(payload: PatientCreate):
         patient_name=payload.name,
         diagnosis=payload.diagnosis,
         new_value=f"{score}/100",
-        decision_maker=payload.decision_maker,
+        decision_maker=actor_name, actor_email=actor_email, actor_role=actor_role,
     )
     care = care_level_recommendation(score, bool(payload.critical))
     log_audit(
@@ -257,7 +370,7 @@ def create_patient(payload: PatientCreate):
         diagnosis=payload.diagnosis,
         recommendation=care["care_level"],
         new_value=care["care_level"],
-        decision_maker=payload.decision_maker,
+        decision_maker=actor_name, actor_email=actor_email, actor_role=actor_role,
     )
 
     conn.commit()
@@ -275,7 +388,7 @@ def create_patient(payload: PatientCreate):
             diagnosis=payload.diagnosis,
             recommendation=f"Priority #{new_rank}",
             new_value=f"Priority #{new_rank}",
-            decision_maker=payload.decision_maker,
+            decision_maker=actor_name, actor_email=actor_email, actor_role=actor_role,
         )
         conn.commit()
 
@@ -284,7 +397,8 @@ def create_patient(payload: PatientCreate):
 
 
 @app.patch("/patients/{patient_id}")
-def update_patient(patient_id: str, payload: PatientUpdate):
+def update_patient(patient_id: str, payload: PatientUpdate,
+                   user: dict = Depends(auth.require_role("Doctor"))):
     """Clinical deterioration / assessment update.
 
     Applies changes, recalculates the score, re-ranks the waiting queue and
@@ -349,7 +463,9 @@ def update_patient(patient_id: str, payload: PatientUpdate):
     new_rank = after.get(patient_id, {}).get("rank")
 
     ts = _now()
-    maker = payload.decision_maker
+    maker = user["full_name"]
+    actor_email = user["email"]
+    actor_role = user["role"]
     p_name = apply_values.get("name", current.get("name"))
     p_diag = apply_values.get("diagnosis", current.get("diagnosis"))
 
@@ -363,7 +479,7 @@ def update_patient(patient_id: str, payload: PatientUpdate):
             diagnosis=p_diag,
             previous_value=f"{change['label']}: {change['old']}",
             new_value=f"{change['label']}: {change['new']}",
-            decision_maker=maker,
+            decision_maker=maker, actor_email=actor_email, actor_role=actor_role,
         )
 
     if prev_score != new_score:
@@ -376,7 +492,7 @@ def update_patient(patient_id: str, payload: PatientUpdate):
             diagnosis=p_diag,
             previous_value=f"{prev_score}/100" if prev_score is not None else None,
             new_value=f"{new_score}/100" if new_score is not None else None,
-            decision_maker=maker,
+            decision_maker=maker, actor_email=actor_email, actor_role=actor_role,
         )
 
     # Log rank changes for every waiting patient whose rank moved.
@@ -392,7 +508,7 @@ def update_patient(patient_id: str, payload: PatientUpdate):
                 diagnosis=info.get("diagnosis"),
                 previous_value=f"#{old_rank}",
                 new_value=f"#{info['rank']}",
-                decision_maker=maker,
+                decision_maker=maker, actor_email=actor_email, actor_role=actor_role,
             )
 
     if new_rank is not None:
@@ -406,7 +522,7 @@ def update_patient(patient_id: str, payload: PatientUpdate):
             recommendation=f"Priority #{new_rank}",
             previous_value=f"Priority #{prev_rank}" if prev_rank is not None else None,
             new_value=f"Priority #{new_rank}",
-            decision_maker=maker,
+            decision_maker=maker, actor_email=actor_email, actor_role=actor_role,
         )
 
     if new_score is not None:
@@ -422,7 +538,7 @@ def update_patient(patient_id: str, payload: PatientUpdate):
             diagnosis=p_diag,
             recommendation=care["care_level"],
             new_value=care["care_level"],
-            decision_maker=maker,
+            decision_maker=maker, actor_email=actor_email, actor_role=actor_role,
         )
 
     conn.commit()
@@ -447,7 +563,7 @@ def priority(scores: dict):
 
 
 @app.post("/allocation")
-def allocation(payload: DecisionCreate):
+def allocation(payload: DecisionCreate, user: dict = Depends(auth.require_role("Doctor"))):
     if payload.decision not in DECISION_EVENTS:
         raise HTTPException(
             status_code=400,
@@ -469,6 +585,10 @@ def allocation(payload: DecisionCreate):
         conn.close()
         raise HTTPException(status_code=404, detail="Patient not found")
 
+    actor_name = user["full_name"]
+    actor_email = user["email"]
+    actor_role = user["role"]
+
     log_audit(
         conn,
         event=DECISION_EVENTS[payload.decision],
@@ -477,7 +597,7 @@ def allocation(payload: DecisionCreate):
         diagnosis=patient["diagnosis"],
         recommendation=payload.recommendation,
         decision=payload.decision,
-        decision_maker=payload.decision_maker,
+        decision_maker=actor_name, actor_email=actor_email, actor_role=actor_role,
         reason=payload.reason,
     )
 
@@ -498,7 +618,7 @@ def allocation(payload: DecisionCreate):
                 patient_name=info.get("name"),
                 diagnosis=info.get("diagnosis"),
                 new_value=f"#{info['rank']}",
-                decision_maker=payload.decision_maker,
+                decision_maker=actor_name, actor_email=actor_email, actor_role=actor_role,
             )
 
     conn.commit()
@@ -638,7 +758,7 @@ def datasets_schema(dataset_key: str):
 
 
 @app.post("/datasets/{dataset_key}/import")
-def datasets_import(dataset_key: str):
+def datasets_import(dataset_key: str, user: dict = Depends(auth.require_role("Doctor", "Administrator"))):
     if dataset_key not in ingestion.DATASETS:
         raise HTTPException(status_code=404, detail="Unknown dataset")
     result = ingestion.import_dataset(dataset_key)
@@ -652,6 +772,7 @@ def datasets_import(dataset_key: str):
                 f"({result['rejected_rows']} rejected)"
             ),
             reason=result.get("source"),
+            decision_maker=user["full_name"], actor_email=user["email"], actor_role=user["role"],
         )
         conn.commit()
         conn.close()
@@ -669,7 +790,7 @@ def ml_validation():
 
 
 @app.post("/ml/train")
-def ml_train(payload: TrainRequest):
+def ml_train(payload: TrainRequest, user: dict = Depends(auth.require_role("Doctor", "Administrator"))):
     result = ml_model.train_survival_model(
         target_column=payload.target_column,
         features=payload.features,
@@ -684,7 +805,7 @@ def ml_train(payload: TrainRequest):
                 f"{result['model_version']} · target={result['target_column']} · "
                 f"AUC={result['metrics'].get('roc_auc')}"
             ),
-            decision_maker=payload.trained_by,
+            decision_maker=user["full_name"], actor_email=user["email"], actor_role=user["role"],
             reason=result.get("dataset_source"),
         )
         conn.commit()

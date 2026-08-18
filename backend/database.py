@@ -29,6 +29,25 @@ def init_db() -> None:
             role TEXT NOT NULL CHECK(role IN ('Doctor','Nurse','Coordinator','Administrator'))
         );
 
+        -- Authenticated application users (email/password + bcrypt hash).
+        CREATE TABLE IF NOT EXISTS users_auth (
+            user_id TEXT PRIMARY KEY,
+            full_name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('Doctor','Nurse','Coordinator','Administrator')),
+            department TEXT DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT,
+            last_login TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            attempt_time TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS patients (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -128,6 +147,8 @@ def init_db() -> None:
         ("event", "TEXT"),
         ("previous_value", "TEXT"),
         ("new_value", "TEXT"),
+        ("actor_email", "TEXT"),
+        ("actor_role", "TEXT"),
     ]:
         _add_column_if_missing(cur, "audit_logs", column, definition)
 

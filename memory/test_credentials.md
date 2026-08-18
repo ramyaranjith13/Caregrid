@@ -1,16 +1,25 @@
-# CareGrid — Test Access
+# CareGrid — Test Credentials (LOCAL ONLY — git-ignored, never committed)
 
-CareGrid uses **role selection** (Streamlit session), not password authentication
-(per requirement: no hospital-grade auth in the MVP).
+Authentication: custom email/password (bcrypt) + JWT Bearer token.
+Backend: http://127.0.0.1:8000 · Passwords live only in backend/.env (git-ignored).
 
-On the landing screen choose a role and click **ENTER CAREGRID**:
+## Accounts (seeded idempotently on startup)
+| Email | Password | Role | Department |
+|-------|----------|------|------------|
+| admin@caregrid.local | lTKmFJimWU_i6rMY | Administrator | Administration |
+| doctor1@caregrid.local | VCo-PtjTNG9Wzx0U | Doctor | ICU |
+| doctor2@caregrid.local | VCo-PtjTNG9Wzx0U | Doctor | Emergency |
+| nurse@caregrid.local | VCo-PtjTNG9Wzx0U | Nurse | ICU |
+| coordinator@caregrid.local | VCo-PtjTNG9Wzx0U | Coordinator | Operations |
 
-| Role | Display name | Access |
-|------|--------------|--------|
-| Doctor | Dr. S. Krishnan | Full: register patients, edit assessment, Accept/Override/Defer, import datasets, train model |
-| Nurse | Nurse on Duty | View-only |
-| Coordinator | ICU Coordinator | View-only |
-| Administrator | Hospital Administrator | View-only |
+## Auth endpoints
+POST /auth/login {email,password} -> {token, user}
+GET  /auth/me            (Bearer)
+POST /auth/logout        (Bearer)
+GET  /users              (Administrator)
+POST /users              (Administrator)
+PATCH /users/{id}        (Administrator)
+POST /users/{id}/reset-password (Administrator)
 
-Backend runs at `CAREGRID_API_URL` (default `http://127.0.0.1:8000`).
-No secrets or credentials are stored.
+Send the token as: Authorization: Bearer <token>
+Doctor role required for: POST /patients, PATCH /patients/{id}, POST /allocation, dataset import, ML train.

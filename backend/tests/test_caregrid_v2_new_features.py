@@ -10,6 +10,28 @@ import requests
 BASE_URL = "http://127.0.0.1:8000"
 
 
+def _auth_header():
+    demo_pw = None
+    import os
+    env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+    try:
+        for line in open(env_path):
+            if line.startswith("SEED_DEMO_PASSWORD"):
+                demo_pw = line.split('"')[1]
+    except OSError:
+        return {}
+    if not demo_pw:
+        return {}
+    r = requests.post(f"{BASE_URL}/auth/login",
+                      json={"email": "doctor1@caregrid.local", "password": demo_pw})
+    if r.status_code == 200:
+        return {"Authorization": f"Bearer {r.json()['token']}"}
+    return {}
+
+
+AUTH = _auth_header()
+
+
 # -------------------- Care Level Recommendation -------------------- #
 class TestCareLevel:
     def test_all_patients_have_care_level(self):
@@ -57,7 +79,7 @@ class TestCareLevel:
             "resource": 8,
             "required_resources": "Ventilator",
         }
-        r = requests.post(f"{BASE_URL}/patients", json=payload)
+        r = requests.post(f"{BASE_URL}/patients", json=payload, headers=AUTH)
         assert r.status_code in (200, 201), r.text
         data = r.json()
         assert "priority_score" in data
@@ -122,7 +144,7 @@ class TestRealDataset:
         assert entry.get("rows") == 3600
 
     def test_reimport_idempotent(self):
-        r = requests.post(f"{BASE_URL}/datasets/icu_outcome_real/import")
+        r = requests.post(f"{BASE_URL}/datasets/icu_outcome_real/import", headers=AUTH)
         assert r.status_code == 200, r.text
         data = r.json()
         assert data.get("status") == "skipped", data
@@ -218,7 +240,7 @@ class TestBedMatching:
             "survival_likelihood": 90, "resource": 3,
             "required_resources": "",
         }
-        c = requests.post(f"{BASE_URL}/patients", json=payload)
+        c = requests.post(f"{BASE_URL}/patients", json=payload, headers=AUTH)
         assert c.status_code in (200, 201), c.text
         r = requests.get(f"{BASE_URL}/beds/match/{pid}")
         assert r.status_code == 200

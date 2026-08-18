@@ -60,6 +60,15 @@ User decisions: keep survival model synthetic that round; ingest 4 real uploaded
 - **Dashboard polish**: 6-metric top row incl. Step-Down Available + alerts banner; step-down bed table; sidebar nav (Dashboard / Analytics / Capacity / Simulation / Export).
 - **Verified**: testing_agent 35/35 backend pass; Streamlit AppTests (dashboard, analytics, all pages) pass; pyflakes clean; `/health` + `/docs` 200; requirements valid.
 
+## Implemented — Session 4: Authentication (2026-08-18)
+- **Auth**: custom email/password + bcrypt (`$2b$`) + JWT Bearer (PyJWT HS256, 12h TTL). New `backend/auth.py`. Streamlit stores token in session_state and sends `Authorization: Bearer` (no cookies — server-side frontend).
+- **DB**: `users_auth` (user_id, full_name, email UNIQUE, password_hash, role, department, active, created_at, last_login) + `login_attempts` (brute-force 5/15min) + audit_logs `actor_email`/`actor_role`. Additive migrations.
+- **Endpoints**: `/auth/login`, `/auth/me`, `/auth/logout`, `/users` (GET/POST), `/users/{id}` PATCH, `/users/{id}/reset-password` (all admin). Clinical writes (POST /patients, PATCH /patients/{id}, POST /allocation, dataset import, ML train) now require Doctor (or Admin for data/ML) via `require_role`. Reads open to logged-in app.
+- **Audit** now attributes every event to the authenticated user (name/email/role from token, not client input).
+- **Frontend**: login page (email/password), logout, sidebar user card (Name/Email/Role/Department), Administrator-only User Management page (create/list/activate-deactivate/update/reset-password). Role gating driven by authenticated role.
+- **Seed** (idempotent, env-driven, no plaintext in source): admin + doctor1/doctor2/nurse/coordinator. Passwords in `backend/.env` + `memory/test_credentials.md` (both git-ignored).
+- **Verified**: testing_agent 57/57 backend (22 auth + 35 regression), no issues; Streamlit AppTest `tests/test_auth_apptest.py` (login gate, role gating, admin page). No user enumeration; bcrypt verified; weights unchanged.
+
 ## Backlog (not yet built)
 - P1: Step-down / care-level recommendation UI, per-patient bed compatibility matching, near-tie UI explanation.
 - P1: Simulation mode; capacity forecast (ICU + step-down); export reports (CSV).

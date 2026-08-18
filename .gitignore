@@ -7,3 +7,5 @@ data/raw/
 data/processed/
 !data/README.md
 .env
+backend/.env
+memory/test_credentials.md
